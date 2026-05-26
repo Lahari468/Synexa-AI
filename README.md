@@ -85,7 +85,7 @@ Synexa/
 ### 1️⃣ Clone the repository
 
 ```
-git clone https://github.com/Lahari468/Synexa.git
+git clone https://github.com/Lahari468/Synexa-AI.git
 cd Synexa
 ```
 
