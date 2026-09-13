@@ -2,8 +2,6 @@
 
 **Synexa** is an enterprise-grade Retrieval-Augmented Generation (RAG) and Document Intelligence Platform built to solve precision, recall, and keyword drop-off challenges in static vector-only search. It features **Hybrid Dense+Sparse Search (BM25 + FAISS + RRF)**, **Two-Stage Cross-Encoder Reranking**, **Parent-Child Hierarchical Chunking**, **Real-Time Token Streaming (SSE)**, and a **Quantitative RAG Evaluation Suite**.
 
----
-
 ## 🎯 Architecture Diagram
 
 ```mermaid
@@ -37,8 +35,6 @@ flowchart TD
     B <--> P
 ```
 
----
-
 ## 🔥 Key Technical Highlights & Engineering Decisions
 
 ### 1. Hybrid Search (Dense FAISS + Sparse BM25 + Reciprocal Rank Fusion)
@@ -63,8 +59,6 @@ flowchart TD
 ### 5. Quantitative RAG Evaluation Suite (`eval_rag.py`)
 - Automated benchmark framework calculating **Context Precision, Context Recall, Answer Faithfulness, and Latency**.
 
----
-
 ## 🛠️ Tech Stack
 
 | Layer | Technology |
@@ -78,7 +72,6 @@ flowchart TD
 | **Testing** | Pytest, Pytest-Asyncio, HTTPX |
 | **Frontend** | React 18, Vite, Tailwind CSS, Lucide React, EventSource |
 
----
 
 ## 🚀 Quick Start
 
@@ -119,8 +112,3 @@ npm install
 npm run dev
 ```
 Open `http://localhost:5173`.
-
----
-
-## 📄 License
-MIT License. Built for enterprise RAG benchmarking and demonstration.
