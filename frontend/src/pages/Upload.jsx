@@ -25,9 +25,7 @@ export default function Upload() {
         {/* Workspace Top Header */}
         <div className="flex items-center justify-between px-8 py-5 border-b border-white/[0.06] bg-[#0B1222]/80 backdrop-blur-md sticky top-0 z-20">
           <div className="flex items-center gap-3">
-            <div className="w-8 h-8 rounded-xl bg-blue-600/20 border border-blue-500/30 p-1 flex items-center justify-center">
-              <img src="/logo.png" alt="Synexa" className="w-full h-full object-contain" />
-            </div>
+            
             <div>
               <h2 className="font-display font-bold text-white text-base leading-tight">Document Workspace</h2>
               <p className="text-[11px] text-slate-400">Upload documents or resume chat history</p>
