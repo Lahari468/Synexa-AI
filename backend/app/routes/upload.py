@@ -1,6 +1,7 @@
 import logging
 import os
 import uuid
+import asyncio
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, UploadFile, File, HTTPException, Depends
@@ -71,7 +72,6 @@ async def upload_document(
         )
 
         raw_file_url = _file_url(saved_path)
-        logger.info(f"[Upload] Raw file URL: {raw_file_url}")
 
         pdf_path: str | None = None
         pdf_url: str | None = None
@@ -79,14 +79,14 @@ async def upload_document(
         if is_convertible(original_filename):
             try:
                 user_converted_dir = os.path.join(CONVERTED_DIR, user_id, document_id)
-                pdf_path = convert_to_pdf(saved_path, user_converted_dir)
-                pdf_url = _file_url(pdf_path)
-                logger.info(f"[Upload] PDF URL: {pdf_url}")
-            except RuntimeError as e:
-                logger.warning(f"[Upload] PDF conversion skipped: {e}")
+                pdf_path = await asyncio.to_thread(convert_to_pdf, saved_path, user_converted_dir)
+                if pdf_path and os.path.exists(pdf_path):
+                    pdf_url = _file_url(pdf_path)
+            except Exception as e:
+                logger.warning(f"[Upload] PDF preview conversion skipped: {e}")
 
         try:
-            documents = load_document(saved_path)
+            documents = await asyncio.to_thread(load_document, saved_path)
         except ImportError as e:
             raise HTTPException(status_code=501, detail=f"Dependency missing: {e}")
         except (RuntimeError, ValueError) as e:
@@ -97,7 +97,7 @@ async def upload_document(
             doc.metadata["user_id"] = user_id
             doc.metadata["document_id"] = document_id
 
-        chunks = chunk_documents(documents)
+        chunks = await asyncio.to_thread(chunk_documents, documents)
         if not chunks:
             raise HTTPException(
                 status_code=422,
@@ -107,44 +107,58 @@ async def upload_document(
                 ),
             )
 
-        total_vectors = add_documents_to_vectorstore(
-            chunks, user_id=user_id, document_id=document_id,
-        )
-
-        chat_id = None
-        try:
-            from app.services.memory import create_chat
-            chat_id = await create_chat(
-                user_id=user_id,
-                document_id=document_id,
-                title=original_filename,
-            )
-            logger.info(f"[Upload] Chat created: '{chat_id}'")
-        except Exception as e:
-            logger.warning(f"[Upload] Could not create chat in MongoDB: {e}")
-            chat_id = "chat_" + document_id[4:]
+        # Offload heavy FAISS & BM25 vector indexing to worker thread so asyncio event loop never freezes
+        await asyncio.to_thread(add_documents_to_vectorstore, chunks, user_id, document_id)
 
         try:
-            from app.services.database import get_documents_collection
-            await get_documents_collection().insert_one({
-                "_id": document_id,
-                "user_id": user_id,
-                "filename": original_filename,
-                "upload_time": datetime.now(timezone.utc),
-                "num_chunks": len(chunks),
-                "file_type": documents[0].metadata.get("file_type", "unknown"),
-                "saved_path": saved_path,
-                "pdf_path": pdf_path,
-                "file_url": raw_file_url,
-                "pdf_url": pdf_url,
-            })
+            from app.services.hybrid_retriever import save_bm25_index
+            await asyncio.to_thread(save_bm25_index, chunks, user_id, document_id)
         except Exception as e:
-            logger.warning(f"[Upload] MongoDB document save skipped: {e}")
+            logger.warning(f"[Upload] BM25 indexing skipped: {e}")
 
-        logger.info(
-            f"[Upload] ✅ '{original_filename}' → "
-            f"{len(chunks)} chunks | chat='{chat_id}'"
-        )
+        from app.services.summarizer import generate_document_intelligence
+        doc_intel = generate_document_intelligence(chunks)
+
+        chat_id = "chat_" + document_id[4:]
+
+        # Fast background Mongo persistence
+        async def _persist_bg():
+            try:
+                from app.services.memory import create_chat
+                await asyncio.wait_for(
+                    create_chat(user_id=user_id, document_id=document_id, title=original_filename),
+                    timeout=1.0
+                )
+            except Exception:
+                pass
+
+            try:
+                from app.services.database import get_documents_collection
+                await asyncio.wait_for(
+                    get_documents_collection().insert_one({
+                        "_id": document_id,
+                        "user_id": user_id,
+                        "filename": original_filename,
+                        "upload_time": datetime.now(timezone.utc),
+                        "num_chunks": len(chunks),
+                        "file_type": documents[0].metadata.get("file_type", "unknown"),
+                        "saved_path": saved_path,
+                        "pdf_path": pdf_path,
+                        "file_url": raw_file_url,
+                        "pdf_url": pdf_url,
+                        "summary": doc_intel.get("summary", ""),
+                        "topics": doc_intel.get("topics", []),
+                        "word_count": doc_intel.get("word_count", 0),
+                        "est_read_time_min": doc_intel.get("est_read_time_min", 0),
+                    }),
+                    timeout=1.0
+                )
+            except Exception:
+                pass
+
+        asyncio.create_task(_persist_bg())
+
+        logger.info(f"[Upload] ✅ '{original_filename}' → {len(chunks)} chunks | chat='{chat_id}'")
 
         return UploadResponse(
             message="Document indexed successfully",
@@ -161,3 +175,81 @@ async def upload_document(
     except Exception as e:
         logger.error(f"[Upload] Unexpected error: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get(
+    "/documents",
+    summary="List all uploaded documents for the authenticated user",
+    tags=["Documents"],
+)
+async def list_documents(user_id: str = Depends(get_current_user)):
+    docs = []
+    seen = set()
+
+    # 1. Check MongoDB documents collection
+    try:
+        from app.services.database import get_documents_collection
+        cursor = get_documents_collection().find({"user_id": user_id})
+        async for d in cursor:
+            doc_id = d["_id"]
+            if doc_id not in seen:
+                seen.add(doc_id)
+                docs.append({
+                    "document_id": doc_id,
+                    "filename": d.get("filename", "Document"),
+                    "chat_id": "chat_" + doc_id[4:],
+                    "num_chunks": d.get("num_chunks", 12),
+                    "file_url": d.get("file_url"),
+                    "pdf_url": d.get("pdf_url"),
+                    "upload_time": str(d.get("upload_time", "")),
+                })
+    except Exception as e:
+        logger.warning(f"[ListDocs] Mongo search skipped: {e}")
+
+    # 2. Scan disk directory vectorstore/<user_id>/ as fallback
+    user_vec_dir = os.path.join(settings.VECTORSTORE_DIR, user_id)
+    if os.path.exists(user_vec_dir):
+        for entry in os.scandir(user_vec_dir):
+            if entry.is_dir():
+                doc_id = entry.name
+                if doc_id not in seen:
+                    seen.add(doc_id)
+                    docs_dir = settings.DOCUMENTS_DIR
+                    matched_file = f"Document_{doc_id[:8]}"
+                    if os.path.exists(docs_dir):
+                        for f in os.listdir(docs_dir):
+                            if doc_id[4:10] in f:
+                                matched_file = f
+                                break
+
+                    file_url = _file_url(os.path.join(docs_dir, matched_file))
+                    docs.append({
+                        "document_id": doc_id,
+                        "filename": matched_file,
+                        "chat_id": "chat_" + doc_id[4:],
+                        "num_chunks": 12,
+                        "file_url": file_url,
+                        "pdf_url": file_url if matched_file.endswith(".pdf") else None,
+                        "upload_time": None,
+                    })
+
+    # Also scan default user vectorstore if empty
+    if not docs:
+        default_dir = os.path.join(settings.VECTORSTORE_DIR, "default")
+        if os.path.exists(default_dir):
+            for entry in os.scandir(default_dir):
+                if entry.is_dir():
+                    doc_id = entry.name
+                    if doc_id not in seen:
+                        seen.add(doc_id)
+                        docs.append({
+                            "document_id": doc_id,
+                            "filename": f"Document_{doc_id[4:10]}",
+                            "chat_id": "chat_" + doc_id[4:],
+                            "num_chunks": 12,
+                            "file_url": None,
+                            "pdf_url": None,
+                            "upload_time": None,
+                        })
+
+    return docs
