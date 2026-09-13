@@ -1,7 +1,10 @@
 import axios from 'axios'
 
+// Direct connection to FastAPI backend
+const API_BASE_URL = 'http://127.0.0.1:8000'
+
 const api = axios.create({
-  baseURL: '/',
+  baseURL: API_BASE_URL,
   timeout: 600000,
 })
 
@@ -60,32 +63,110 @@ export async function uploadDocument(file, onProgress) {
   const formData = new FormData()
   formData.append('file', file)
 
+  const fileSize = file.size || 1
+
   const response = await api.post('/upload', formData, {
     headers: { 'Content-Type': 'multipart/form-data' },
-    timeout: 600000,   // 10 min per-request override
-    onUploadProgress: (e) => {
-      if (onProgress && e.total) {
-        onProgress(Math.round((e.loaded * 100) / e.total))
+    onUploadProgress: (progressEvent) => {
+      if (onProgress) {
+        const total = progressEvent.total || fileSize
+        const percent = Math.min(99, Math.round((progressEvent.loaded * 100) / total))
+        onProgress(percent)
       }
     },
   })
+  if (onProgress) onProgress(100)
   return response.data
 }
 
-// ── Ask ───────────────────────────────────────────────────
-
-export async function askQuestion(question, mode = 'simple', chatId) {
+export async function askQuestion(question, mode = 'simple', chatId = null, documentId = null, documentIds = null) {
   const response = await api.post('/ask', {
     question,
     mode,
     chat_id: chatId,
+    document_id: documentId,
+    document_ids: documentIds,
   })
   return response.data
 }
 
-// ── Chat management ───────────────────────────────────────
+export async function askQuestionStream({ question, mode = 'simple', chatId = null, documentId = null, documentIds = null, onMeta, onToken, onDone, onError }) {
+  const token = getToken()
+  const headers = { 'Content-Type': 'application/json' }
+  if (token) {
+    headers['Authorization'] = `Bearer ${token}`
+  }
 
-export async function listChats() {
+  try {
+    const response = await fetch(`${API_BASE_URL}/ask/stream`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({
+        question,
+        mode,
+        chat_id: chatId,
+        document_id: documentId,
+        document_ids: documentIds,
+      }),
+    })
+
+    if (!response.ok) {
+      const errText = await response.text()
+      throw new Error(`HTTP ${response.status}: ${errText}`)
+    }
+
+    const reader = response.body.getReader()
+    const decoder = new TextDecoder()
+    let buffer = ''
+
+    while (true) {
+      const { done, value } = await reader.read()
+      if (done) break
+
+      buffer += decoder.decode(value, { stream: true })
+      const lines = buffer.split('\n')
+      buffer = lines.pop() || ''
+
+      for (const line of lines) {
+        const trimmed = line.trim()
+        if (!trimmed.startsWith('data:')) continue
+
+        const rawData = trimmed.replace(/^data:\s*/, '')
+        if (rawData === '[DONE]') {
+          if (onDone) onDone()
+          return
+        }
+
+        try {
+          const parsed = JSON.parse(rawData)
+          if (parsed.type === 'meta' && onMeta) {
+            onMeta(parsed)
+          } else if (parsed.type === 'token' && onToken) {
+            onToken(parsed.content)
+          }
+        } catch (e) {
+          console.warn('[SSE] Parse warning:', e)
+        }
+      }
+    }
+    if (onDone) onDone()
+  } catch (err) {
+    console.error('[SSE] Error:', err)
+    if (onError) onError(err)
+  }
+}
+
+export async function getDocument(documentId) {
+  const response = await api.get(`/documents/${documentId}`)
+  return response.data
+}
+
+export async function getDocuments() {
+  const response = await api.get('/documents')
+  return response.data
+}
+
+export async function getUserChats() {
   const response = await api.get('/chats')
   return response.data
 }
@@ -105,11 +186,6 @@ export async function deleteDocument(documentId) {
   return response.data
 }
 
-// ── Health ────────────────────────────────────────────────
-
-export async function healthCheck() {
-  const response = await api.get('/')
-  return response.data
+export function getFileUrl(filename) {
+  return `${API_BASE_URL}/files/${encodeURIComponent(filename)}`
 }
-
-export default api

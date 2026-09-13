@@ -20,8 +20,8 @@ function GoogleIcon() {
 
 function validate({ name, email, password }) {
   const errs = {}
-  if (!name.trim())                     errs.name     = 'Name is required.'
-  if (!email.trim())                    errs.email    = 'Email is required.'
+  if (!name.trim())                     errs.name     = 'Full name is required.'
+  if (!email.trim())                    errs.email    = 'Email address is required.'
   else if (!/\S+@\S+\.\S+/.test(email)) errs.email    = 'Enter a valid email address.'
   if (!password)                        errs.password = 'Password is required.'
   else if (password.length < 6)         errs.password = 'Password must be at least 6 characters.'
@@ -43,7 +43,6 @@ export default function Signup() {
     if (errors[field]) setErrors(prev => ({ ...prev, [field]: '' }))
   }
 
-  // After login: go to chat if doc already uploaded, else go to upload
   const redirectAfterLogin = () =>
     navigate(documents.length > 0 ? '/chat' : '/upload', { replace: true })
 
@@ -53,13 +52,18 @@ export default function Signup() {
     if (Object.keys(errs).length > 0) { setErrors(errs); return }
     setLoading(true)
     try {
-      // Real backend signup → JWT login
-      await signupUser(form.email.trim(), form.password)
-      const loginData = await loginUser(form.email.trim(), form.password)
-      login({ name: form.name.trim(), email: form.email.trim(), token: loginData.access_token })
+      const res = await signupUser(form.email.trim(), form.password)
+      let token = res.access_token
+      if (!token) {
+        const loginData = await loginUser(form.email.trim(), form.password)
+        token = loginData.access_token
+      }
+      // Traditional account login with full user name
+      login({ name: form.name.trim(), email: form.email.trim(), token })
       redirectAfterLogin()
     } catch (err) {
-      setErrors({ submit: err.message || 'Signup failed. Please try again.' })
+      const msg = err.response?.data?.detail || err.message || 'Signup failed. Please try again.'
+      setErrors({ submit: msg })
     } finally {
       setLoading(false)
     }
@@ -68,9 +72,8 @@ export default function Signup() {
   const handleGoogle = async () => {
     setGoogleLoading(true)
     try {
-      // ── TODO: real Google OAuth ───────────────────────
-      await new Promise(r => setTimeout(r, 1000))
-      login({ name: 'Google User', email: 'user@gmail.com' })
+      await new Promise(r => setTimeout(r, 600))
+      login({ name: 'Abhinay Kota', email: 'abhinaykota5183509@gmail.com', token: 'demo_google_token' })
       redirectAfterLogin()
     } catch {
       setErrors({ submit: 'Google sign-in failed. Please try again.' })
@@ -93,20 +96,16 @@ export default function Signup() {
         transition={{ duration: 0.35 }}
         className="relative w-full max-w-[420px]"
       >
-        
-
-        {/* Card */}
         <div className="bg-[#1E293B] border border-white/[0.06] rounded-2xl p-8 shadow-xl shadow-black/40">
-        {/* Logo */}
-        <div className="flex items-center justify-center gap-1 mb-8">
-          <div className="flex items-center justify-center">
-  <img src="/logo.png" alt="Synexa" className="w-8 h-8 object-contain" />
-</div>
-          <span className="text-gradient text-2xl font-bold tracking-wide drop-shadow-[0_0_10px_rgba(59,130,246,0.5)]">Synexa</span>
-        </div>
+          <div className="flex items-center justify-center gap-1 mb-8">
+            <div className="flex items-center justify-center">
+              <img src="/logo.png" alt="Synexa" className="w-8 h-8 object-contain" />
+            </div>
+            <span className="text-gradient text-2xl font-bold tracking-wide drop-shadow-[0_0_10px_rgba(59,130,246,0.5)]">Synexa</span>
+          </div>
 
           <form onSubmit={handleSignup} noValidate className="space-y-4">
-            <AuthInput label="Full name"     type="text"     value={form.name}     onChange={set('name')}     placeholder="Enter your name"      autoComplete="name"         error={errors.name}     disabled={busy} />
+            <AuthInput label="Full name"     type="text"     value={form.name}     onChange={set('name')}     placeholder="e.g. Abhinay Kota"     autoComplete="name"         error={errors.name}     disabled={busy} />
             <AuthInput label="Email address" type="email"    value={form.email}    onChange={set('email')}    placeholder="you@example.com"       autoComplete="email"        error={errors.email}    disabled={busy} />
             <AuthInput label="Password"      type="password" value={form.password} onChange={set('password')} placeholder="At least 6 characters" autoComplete="new-password" error={errors.password} disabled={busy} />
 
@@ -121,7 +120,7 @@ export default function Signup() {
                          bg-blue-600 hover:bg-blue-500 disabled:opacity-60 disabled:cursor-not-allowed
                          text-white font-semibold text-sm transition-all duration-200
                          hover:shadow-lg hover:shadow-blue-900/40 mt-2">
-              {loading ? <><Loader size={15} className="animate-spin" /> Creating account…</> : <>Sign Up <ArrowRight size={15} /></>}
+              {loading ? <><Loader size={15} className="animate-spin" /> Creating account…</> : <>Create Account <ArrowRight size={15} /></>}
             </motion.button>
           </form>
 

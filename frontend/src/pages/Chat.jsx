@@ -1,4 +1,4 @@
-import { useEffect } from 'react'
+import { useEffect, Component } from 'react'
 import { AnimatePresence, motion } from 'framer-motion'
 import Sidebar from '../components/Sidebar'
 import ChatBox from '../components/ChatBox'
@@ -6,9 +6,47 @@ import DocumentViewer from '../components/DocumentViewer'
 import { useChat } from '../context/ChatContext'
 import { useNavigate } from 'react-router-dom'
 
+class ViewerErrorBoundary extends Component {
+  constructor(props) {
+    super(props)
+    this.state = { hasError: false }
+  }
+
+  static getDerivedStateFromError() {
+    return { hasError: true }
+  }
+
+  componentDidCatch(error, errorInfo) {
+    console.error('[DocumentViewer ErrorBoundary caught]:', error, errorInfo)
+  }
+
+  render() {
+    if (this.state.hasError) {
+      return (
+        <div className="flex flex-col items-center justify-center h-full p-6 text-center bg-[#080F1E] text-slate-400">
+          <p className="text-xs font-semibold text-slate-300 mb-1">Document Preview Unavailable</p>
+          <p className="text-[11px] text-slate-500 max-w-xs leading-relaxed">
+            Your document RAG chat is still active and working. Re-upload or refresh to reload preview.
+          </p>
+        </div>
+      )
+    }
+    return this.props.children
+  }
+}
+
 export default function Chat() {
-  const { viewerOpen, setViewerOpen, sidebarCollapsed, activeChat } = useChat()
+  const { viewerOpen, setViewerOpen, sidebarCollapsed, activeChat, chats, switchChat } = useChat()
   const navigate = useNavigate()
+
+  // Auto-select most recent chat or redirect to upload if no active chat
+  useEffect(() => {
+    if (!activeChat && chats.length > 0) {
+      switchChat(chats[0].id)
+    } else if (!activeChat && chats.length === 0) {
+      navigate('/upload', { replace: true })
+    }
+  }, [activeChat, chats, switchChat, navigate])
 
   // Auto-collapse viewer on narrow screens
   useEffect(() => {
@@ -20,9 +58,6 @@ export default function Chat() {
     window.addEventListener('resize', handle)
     return () => window.removeEventListener('resize', handle)
   }, [setViewerOpen])
-
-  // ── Debug ─────────────────────────────────────────────
-  console.log('[Chat] activeChat:', activeChat)
 
   const sideW = sidebarCollapsed ? '64px' : '260px'
 
@@ -40,30 +75,18 @@ export default function Chat() {
         <Sidebar />
       </div>
 
-      {/* CENTER — Chat or empty-state guard */}
+      {/* CENTER — Chat Box */}
       <div className="h-full flex-1 min-w-0 overflow-hidden flex flex-col">
         {activeChat ? (
           <ChatBox />
         ) : (
-          // Guard: shown when no chat exists yet (e.g. first visit or after
-          // all chats deleted). Prompts user to upload rather than showing
-          // a broken blank ChatBox.
-          <div className="flex flex-col items-center justify-center h-full gap-4
-                          text-center px-8">
-            <p className="text-slate-400 font-medium">No active chat</p>
-            <p className="text-slate-600 text-sm">Upload a document to get started.</p>
-            <button
-              onClick={() => navigate('/upload')}
-              className="px-4 py-2 rounded-lg bg-blue-600 hover:bg-blue-500
-                         text-white text-sm transition-all"
-            >
-              Upload a Document
-            </button>
+          <div className="flex flex-col items-center justify-center h-full gap-4 text-center px-8">
+            <p className="text-slate-400 font-medium">Loading chat workspace…</p>
           </div>
         )}
       </div>
 
-      {/* RIGHT — PDF Viewer (only meaningful when activeChat exists) */}
+      {/* RIGHT — Document Preview Viewer */}
       <AnimatePresence initial={false}>
         {viewerOpen && activeChat && (
           <motion.div
@@ -76,7 +99,9 @@ export default function Chat() {
             style={{ minWidth: 0 }}
           >
             <div className="w-full h-full">
-              <DocumentViewer />
+              <ViewerErrorBoundary>
+                <DocumentViewer />
+              </ViewerErrorBoundary>
             </div>
           </motion.div>
         )}

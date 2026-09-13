@@ -1,4 +1,4 @@
-import { createContext, useContext, useState, useCallback } from 'react'
+import { createContext, useContext, useState, useCallback, useEffect } from 'react'
 
 const ChatContext = createContext(null)
 
@@ -39,6 +39,9 @@ export function ChatProvider({ children }) {
   const [chats, setChats]                = useState(loadChats)
   const [activeChat, setActiveChatState] = useState(loadActiveChat)
 
+  // ── Multi-Document Selection state ───────────────────
+  const [selectedDocIds, setSelectedDocIds] = useState([])
+
   // ── UI state ──────────────────────────────────────────
   const [isLoading, setIsLoading]               = useState(false)
   const [darkMode, setDarkMode]                 = useState(true)
@@ -51,18 +54,6 @@ export function ChatProvider({ children }) {
   const [zoomLevel, setZoomLevel]             = useState(1.0)
   const [highlightedPage, setHighlightedPage] = useState(null)
   const [highlightText, setHighlightText]     = useState('')
-
-  // ── Derived ───────────────────────────────────────────
-  const activeDocumentId = activeChat?.documentId || null
-  const activeDocument = activeChat ? {
-    name:       activeChat.documentName,
-    documentId: activeChat.documentId,
-    file:       activeChat.file    ?? null,   // may be null after refresh
-    fileUrl:    activeChat.fileUrl ?? null,   // ← NEW: always a string or null
-    pdfUrl:     activeChat.pdfUrl  ?? null,   // ← NEW: always a string or null
-  } : null
-
-  const messages = activeChat?.messages || []
 
   // ── Internal setters ──────────────────────────────────
   const _setActiveChat = useCallback((chat) => {
@@ -78,22 +69,97 @@ export function ChatProvider({ children }) {
     })
   }, [])
 
+  // ── Auto-sync backend documents on load ──────────────
+  useEffect(() => {
+    async function syncBackendDocuments() {
+      try {
+        const { getDocuments } = await import('../services/api')
+        const remoteDocs = await getDocuments()
+        let deletedChatIds = new Set()
+        try {
+          deletedChatIds = new Set(JSON.parse(localStorage.getItem('synexa_deleted_chats') || '[]'))
+        } catch { /* ignore */ }
+
+        if (remoteDocs && Array.isArray(remoteDocs) && remoteDocs.length > 0) {
+          _setChats(prev => {
+            const existingDocIds = new Set(prev.map(c => c.documentId))
+            const existingChatIds = new Set(prev.map(c => c.id))
+            const newChats = [...prev]
+
+            for (const rd of remoteDocs) {
+              const targetChatId = rd.chat_id || ('chat_' + rd.document_id.slice(4))
+              if (
+                !existingDocIds.has(rd.document_id) &&
+                !existingChatIds.has(targetChatId) &&
+                !deletedChatIds.has(targetChatId) &&
+                !deletedChatIds.has(rd.document_id)
+              ) {
+                newChats.push({
+                  id: targetChatId,
+                  title: rd.filename,
+                  documentId: rd.document_id,
+                  documentName: rd.filename,
+                  chunks: rd.num_chunks || 12,
+                  file: null,
+                  fileUrl: rd.file_url || null,
+                  pdfUrl: rd.pdf_url || null,
+                  messages: [],
+                  createdAt: rd.upload_time || new Date().toISOString(),
+                })
+              }
+            }
+            return newChats
+          })
+        }
+      } catch (err) {
+        console.warn('[ChatContext] Document sync warning:', err)
+      }
+    }
+    syncBackendDocuments()
+  }, [_setChats])
+
+  // ── Derived ───────────────────────────────────────────
+  const activeDocumentId = activeChat?.documentId || null
+  const activeDocument = activeChat ? {
+    name:       activeChat.documentName,
+    documentId: activeChat.documentId,
+    chunks:     activeChat.chunks || 12,
+    file:       activeChat.file    ?? null,   
+    fileUrl:    activeChat.fileUrl ?? null,   
+    pdfUrl:     activeChat.pdfUrl  ?? null,   
+  } : null
+
+  const messages = activeChat?.messages || []
+
+  // ── Multi-Document Toggle Helpers ─────────────────────
+  const toggleDocSelection = useCallback((docId) => {
+    setSelectedDocIds(prev =>
+      prev.includes(docId) ? prev.filter(id => id !== docId) : [...prev, docId]
+    )
+  }, [])
+
+  const clearDocSelection = useCallback(() => {
+    setSelectedDocIds([])
+  }, [])
+
   const createChat = useCallback((
     chatId,
     documentId,
     documentName,
     file,
-    fileUrl = null,   // ← NEW
-    pdfUrl  = null,   // ← NEW
+    fileUrl = null,   
+    pdfUrl  = null,   
+    chunks  = 12,
   ) => {
     const chat = {
       id:           chatId,
       title:        documentName,
       documentId,
       documentName,
+      chunks:       chunks || 12,
       file,
-      fileUrl,         // stored; survives sessionStorage (string)
-      pdfUrl,          // stored; survives sessionStorage (string)
+      fileUrl,         
+      pdfUrl,          
       messages:     [],
       createdAt:    new Date().toISOString(),
     }
@@ -105,6 +171,21 @@ export function ChatProvider({ children }) {
     setHighlightText('')
     return chat
   }, [_setChats, _setActiveChat])
+
+  const newChat = useCallback(() => {
+    if (activeDocument) {
+      const newId = 'chat_' + Math.random().toString(36).substring(2, 11)
+      createChat(
+        newId,
+        activeDocument.documentId,
+        activeDocument.name,
+        activeDocument.file,
+        activeDocument.fileUrl,
+        activeDocument.pdfUrl,
+        activeDocument.chunks,
+      )
+    }
+  }, [activeDocument, createChat])
 
   // ── switchChat ────────────────────────────────────────
   const switchChat = useCallback((chatId) => {
@@ -120,9 +201,20 @@ export function ChatProvider({ children }) {
 
   // ── deleteChat ────────────────────────────────────────
   const deleteChat = useCallback(async (chatId) => {
+    const targetChat = chats.find(c => c.id === chatId)
     try {
-      const { deleteChat: apiDelete } = await import('../services/api')
+      const deleted = JSON.parse(localStorage.getItem('synexa_deleted_chats') || '[]')
+      if (!deleted.includes(chatId)) deleted.push(chatId)
+      if (targetChat?.documentId && !deleted.includes(targetChat.documentId)) deleted.push(targetChat.documentId)
+      localStorage.setItem('synexa_deleted_chats', JSON.stringify(deleted))
+    } catch { /* ignore */ }
+
+    try {
+      const { deleteChat: apiDelete, deleteDocument: apiDeleteDoc } = await import('../services/api')
       await apiDelete(chatId)
+      if (targetChat?.documentId) {
+        await apiDeleteDoc(targetChat.documentId).catch(() => {})
+      }
     } catch (err) {
       console.warn('[ChatContext] deleteChat backend error:', err?.response?.data?.detail || err.message)
     }
@@ -134,10 +226,18 @@ export function ChatProvider({ children }) {
       }
       return next
     })
-  }, [activeChat, _setChats, _setActiveChat])
+  }, [chats, activeChat, _setChats, _setActiveChat])
 
   // ── deleteDocument ────────────────────────────────────
   const deleteDocument = useCallback(async (documentId) => {
+    try {
+      const deleted = JSON.parse(localStorage.getItem('synexa_deleted_chats') || '[]')
+      if (!deleted.includes(documentId)) deleted.push(documentId)
+      const linkedChat = chats.find(c => c.documentId === documentId)
+      if (linkedChat && !deleted.includes(linkedChat.id)) deleted.push(linkedChat.id)
+      localStorage.setItem('synexa_deleted_chats', JSON.stringify(deleted))
+    } catch { /* ignore */ }
+
     try {
       const { deleteDocument: apiDeleteDoc } = await import('../services/api')
       await apiDeleteDoc(documentId)
@@ -152,7 +252,7 @@ export function ChatProvider({ children }) {
       }
       return next
     })
-  }, [activeChat, _setChats, _setActiveChat])
+  }, [chats, activeChat, _setChats, _setActiveChat])
 
   // ── renameChat ────────────────────────────────────────
   const renameChat = useCallback((chatId, newTitle) => {
@@ -201,8 +301,8 @@ export function ChatProvider({ children }) {
         documentId:   chat.documentId,
         documentName: chat.documentName,
         file:         chat.file    ?? null,
-        fileUrl:      chat.fileUrl ?? null,   // ← NEW
-        pdfUrl:       chat.pdfUrl  ?? null,   // ← NEW
+        fileUrl:      chat.fileUrl ?? null,   
+        pdfUrl:       chat.pdfUrl  ?? null,   
         uploadedAt:   chat.createdAt,
       })
     }
@@ -214,17 +314,17 @@ export function ChatProvider({ children }) {
   const activeSessionId = activeChat?.id || null
   const activeSession   = activeChat
 
-  const newChat       = useCallback(() => {}, [])
   const switchSession = useCallback((id) => switchChat(id), [switchChat])
   const renameSession = useCallback((id, t) => renameChat(id, t), [renameChat])
   const deleteSession = useCallback((id) => deleteChat(id), [deleteChat])
 
-  // UploadArea shim: addDocument({ chatId, documentId, name, file, fileUrl, pdfUrl })
+  // UploadArea shim
   const addDocument = useCallback((doc) => {
     createChat(
       doc.chatId, doc.documentId, doc.name, doc.file,
       doc.fileUrl ?? null,
       doc.pdfUrl  ?? null,
+      doc.chunks  ?? 12,
     )
   }, [createChat])
 
@@ -253,10 +353,12 @@ export function ChatProvider({ children }) {
       createChat, switchChat, deleteChat, renameChat, deleteDocument,
       // Messages
       messages, addMessage, clearChat,
+      // Multi-Doc Selection
+      selectedDocIds, setSelectedDocIds, toggleDocSelection, clearDocSelection,
       // Derived (backward compat)
-      activeDocument,      // now includes fileUrl + pdfUrl
+      activeDocument,      
       activeDocumentId,
-      documents,           // now includes fileUrl + pdfUrl per doc
+      documents,           
       addDocument,
       // Legacy session API (Sidebar)
       sessions, activeSession, activeSessionId,
